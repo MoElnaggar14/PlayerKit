@@ -47,23 +47,37 @@ extension AVMediaSelectionOption: TextTrackMetadata {
     ///
     /// - Parameter asset: The AVAsset
     @objc open func set(_ asset: AVAsset) {
-        // Create playback options for faster loading
-        let options: [String: Any] = [
-            AVURLAssetPreferPreciseDurationAndTimingKey: true
-        ]
+        // If the asset is already a URL asset, we should create a new one with our options
+        if let urlAsset = asset as? AVURLAsset {
+            // Create playback options for faster loading
+            let options: [String: Any] = [
+                AVURLAssetPreferPreciseDurationAndTimingKey: true
+            ]
 
-        // Create a specialized playerItem with custom options
-        let playerItem = AVPlayerItem(asset: asset)
+            // Create a new URL asset with our performance options
+            let optimizedAsset = AVURLAsset(url: urlAsset.url, options: options)
 
-        // Optimize for high-speed playback by setting appropriate values
-        if #available(iOS 10.0, tvOS 10.0, macOS 10.12, *) {
-            playerItem.preferredForwardBufferDuration = 10.0 // Start with a good buffer
+            // Create a player item from the optimized asset
+            let playerItem = AVPlayerItem(asset: optimizedAsset)
 
-            // This helps maintain higher playback rates by giving a quality/speed tradeoff hint
-            playerItem.preferredPeakBitRate = 0 // 0 means no limit
+            // Apply high-speed playback optimizations
+            if #available(iOS 10.0, tvOS 10.0, macOS 10.12, *) {
+                playerItem.preferredForwardBufferDuration = 10.0
+                playerItem.preferredPeakBitRate = 0
+            }
+
+            self.set(playerItem: playerItem)
+        } else {
+            // For non-URL assets, we can't apply URL options, but we can still optimize the player item
+            let playerItem = AVPlayerItem(asset: asset)
+
+            if #available(iOS 10.0, tvOS 10.0, macOS 10.12, *) {
+                playerItem.preferredForwardBufferDuration = 10.0
+                playerItem.preferredPeakBitRate = 0
+            }
+
+            self.set(playerItem: playerItem)
         }
-
-        self.set(playerItem: playerItem)
     }
 
     @objc open func set(playerItem: AVPlayerItem) {
