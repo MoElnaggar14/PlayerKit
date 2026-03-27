@@ -39,7 +39,7 @@ extension AVMediaSelectionOption: TextTrackMetadata {
     public var isSeekInProgress: Bool = false
     
     // MARK: - Public API
-    
+
     /// Sets an AVAsset on the player.
     ///
     /// - Parameter asset: The AVAsset
@@ -57,6 +57,84 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         // Replace it with the new item
         self.addPlayerItemObservers(toPlayerItem: playerItem)
         self.player.replaceCurrentItem(with: playerItem)
+    }
+
+    /// Sets an AVAsset with optimized buffering configuration for faster playback start.
+    ///
+    /// - Parameters:
+    ///   - asset: The AVAsset to load
+    ///   - bufferDuration: Preferred forward buffer duration in seconds (default: 10).
+    ///     Lower values start playback faster. Set to 0 to use system default.
+    ///   - peakBitRate: Preferred peak bit rate in bits per second (default: 0 = no limit).
+    ///     Setting a lower value initially can speed up first-frame time.
+    open func setOptimized(_ asset: AVAsset, bufferDuration: TimeInterval = 10, peakBitRate: Double = 0) {
+        let playerItem = AVPlayerItem(asset: asset)
+        playerItem.preferredForwardBufferDuration = bufferDuration
+        if peakBitRate > 0 {
+            playerItem.preferredPeakBitRate = peakBitRate
+        }
+        playerItem.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+        self.set(playerItem: playerItem)
+    }
+
+    /// Asynchronously preloads essential asset keys, then sets the asset on the player
+    /// with optimized buffer configuration. This achieves the fastest possible time-to-first-frame
+    /// by loading metadata concurrently before creating the player item.
+    ///
+    /// - Parameters:
+    ///   - asset: The AVAsset to preload and play
+    ///   - bufferDuration: Preferred forward buffer duration in seconds (default: 10)
+    ///   - peakBitRate: Preferred peak bit rate in bits per second (default: 0 = no limit)
+    @available(iOS 16.0, *)
+    open func setAsync(_ asset: AVAsset, bufferDuration: TimeInterval = 10, peakBitRate: Double = 0) async throws {
+        // Preload essential keys concurrently before creating the player item.
+        // This avoids blocking the player while it synchronously loads metadata.
+        let (isPlayable, _) = try await asset.load(.isPlayable, .duration)
+
+        guard isPlayable else {
+            throw PlayerError.loading.error()
+        }
+
+        await MainActor.run {
+            self.setOptimized(asset, bufferDuration: bufferDuration, peakBitRate: peakBitRate)
+        }
+    }
+
+    /// Preloads an asset's essential keys in the background for later use.
+    /// Call this ahead of time (e.g., when a lesson list loads) to warm up the asset,
+    /// so that when the user taps play, the asset is ready instantly.
+    ///
+    /// - Parameter asset: The AVAsset to preload
+    /// - Returns: Whether the asset is playable
+    @available(iOS 16.0, *)
+    @discardableResult
+    open class func preload(_ asset: AVAsset) async throws -> Bool {
+        let (isPlayable, _) = try await asset.load(.isPlayable, .duration)
+        return isPlayable
+    }
+
+    /// The preferred forward buffer duration of the current player item.
+    /// Setting this to a lower value (e.g., 5-15 seconds) reduces the initial buffering delay.
+    /// A value of 0 lets the system decide.
+    public var preferredForwardBufferDuration: TimeInterval {
+        get {
+            return self.player.currentItem?.preferredForwardBufferDuration ?? 0
+        }
+        set {
+            self.player.currentItem?.preferredForwardBufferDuration = newValue
+        }
+    }
+
+    /// The preferred peak bit rate of the current player item.
+    /// Limiting the initial bit rate can speed up time-to-first-frame on slower connections.
+    /// A value of 0 means no limit.
+    public var preferredPeakBitRate: Double {
+        get {
+            return self.player.currentItem?.preferredPeakBitRate ?? 0
+        }
+        set {
+            self.player.currentItem?.preferredPeakBitRate = newValue
+        }
     }
     
     // MARK: - ProvidesView
