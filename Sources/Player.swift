@@ -48,6 +48,7 @@ public enum PlayerError: Int {
     func playerDidUpdatePlaying(player: Player)
     func playerDidUpdateTime(player: Player)
     func playerDidUpdateBufferedTime(player: Player)
+    @objc optional func playerDidFinishPlaying(player: Player)
 }
 
 /// An object that adopts the Player protocol is responsible for implementing the API and calling PlayerDelegate methods where appropriate.
@@ -79,10 +80,14 @@ public enum PlayerError: Int {
     
     /// Play the video
     func play()
-    
+
+    /// Starts playback at the specified rate atomically, avoiding the audio/video
+    /// desync caused by calling play() then setRate() as two separate operations.
+    func playAtRate(_ rate: Float)
+
     /// Set Rate of video
     func setRate(_ rate: Float)
-    
+
     /// Pause the video
     func pause()
 }

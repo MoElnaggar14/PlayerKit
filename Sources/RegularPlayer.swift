@@ -54,6 +54,9 @@ extension AVMediaSelectionOption: TextTrackMetadata {
             self.removePlayerItemObservers(fromPlayerItem: currentItem)
         }
 
+        // Use timeDomain algorithm for better audio quality at non-1x speeds
+        playerItem.audioTimePitchAlgorithm = .timeDomain
+
         // Replace it with the new item
         self.addPlayerItemObservers(toPlayerItem: playerItem)
         self.player.replaceCurrentItem(with: playerItem)
@@ -194,7 +197,7 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         }
     }
     
-    public var isMuted: Bool = true {
+    public var isMuted: Bool = false {
         didSet {
             player.isMuted = isMuted
         }
@@ -220,7 +223,11 @@ extension AVMediaSelectionOption: TextTrackMetadata {
     open func play() {
         self.player.play()
     }
-    
+
+    open func playAtRate(_ rate: Float) {
+        self.player.rate = rate
+    }
+
     open func setRate(_ rate: Float) {
         self.player.rate = rate
     }
@@ -242,7 +249,8 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         }
 
         super.init()
-        
+
+        self.player.isMuted = self.isMuted
         self.addPlayerObservers()
         self.regularPlayerView.configureForPlayer(player: self.player)
         self.setupAirplay()
@@ -295,13 +303,15 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         let inProgressSeekTarget = self.seekTarget
 
         let completion: (Bool) -> Void = { [weak self] _ in
-            guard let self = self else { return }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
 
-            self.time = CMTimeGetSeconds(inProgressSeekTarget)
-            if CMTimeCompare(inProgressSeekTarget, self.seekTarget) == 0 {
-                self.isSeekInProgress = false
-            } else {
-                self.seekToTarget()
+                self.time = CMTimeGetSeconds(inProgressSeekTarget)
+                if CMTimeCompare(inProgressSeekTarget, self.seekTarget) == 0 {
+                    self.isSeekInProgress = false
+                } else {
+                    self.seekToTarget()
+                }
             }
         }
 
@@ -338,12 +348,25 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         playerItem.addObserver(self, forKeyPath: KeyPath.PlayerItem.Status, options: [.initial, .new], context: nil)
         playerItem.addObserver(self, forKeyPath: KeyPath.PlayerItem.PlaybackLikelyToKeepUp, options: [.initial, .new], context: nil)
         playerItem.addObserver(self, forKeyPath: KeyPath.PlayerItem.LoadedTimeRanges, options: [.initial, .new], context: nil)
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerItemDidPlayToEndTime(_:)),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem
+        )
     }
-    
+
     private func removePlayerItemObservers(fromPlayerItem playerItem: AVPlayerItem) {
         playerItem.removeObserver(self, forKeyPath: KeyPath.PlayerItem.Status, context: nil)
         playerItem.removeObserver(self, forKeyPath: KeyPath.PlayerItem.PlaybackLikelyToKeepUp, context: nil)
         playerItem.removeObserver(self, forKeyPath: KeyPath.PlayerItem.LoadedTimeRanges, context: nil)
+
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem
+        )
     }
     
     private func addPlayerObservers() {
@@ -446,8 +469,12 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         guard let bufferedCMTime = loadedTimeRanges.first?.timeRangeValue.end, let bufferedTime = bufferedCMTime.timeInterval else {
             return
         }
-        
+
         self.bufferedTime = bufferedTime
+    }
+
+    @objc private func playerItemDidPlayToEndTime(_ notification: Notification) {
+        self.delegate?.playerDidFinishPlaying?(player: self)
     }
     
     // MARK: - Capability Protocol Helpers
