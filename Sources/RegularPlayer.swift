@@ -18,6 +18,7 @@ extension AVMediaSelectionOption: TextTrackMetadata {
 
 /// A RegularPlayer is used to play regular videos.
 @objc open class RegularPlayer: NSObject, Player, ProvidesView {
+    
     public struct Constants {
         public static let TimeUpdateInterval: TimeInterval = 0.1
     }
@@ -35,10 +36,10 @@ extension AVMediaSelectionOption: TextTrackMetadata {
     private var seekTolerance: CMTime?
 
     private var seekTarget: CMTime = CMTime.invalid
-    private var isSeekInProgress: Bool = false
+    public var isSeekInProgress: Bool = false
     
     // MARK: - Public API
-    
+
     /// Sets an AVAsset on the player.
     ///
     /// - Parameter asset: The AVAsset
@@ -53,9 +54,90 @@ extension AVMediaSelectionOption: TextTrackMetadata {
             self.removePlayerItemObservers(fromPlayerItem: currentItem)
         }
 
+        // Use timeDomain algorithm for better audio quality at non-1x speeds
+        playerItem.audioTimePitchAlgorithm = .timeDomain
+
         // Replace it with the new item
         self.addPlayerItemObservers(toPlayerItem: playerItem)
         self.player.replaceCurrentItem(with: playerItem)
+    }
+
+    /// Sets an AVAsset with optimized buffering configuration for faster playback start.
+    ///
+    /// - Parameters:
+    ///   - asset: The AVAsset to load
+    ///   - bufferDuration: Preferred forward buffer duration in seconds (default: 10).
+    ///     Lower values start playback faster. Set to 0 to use system default.
+    ///   - peakBitRate: Preferred peak bit rate in bits per second (default: 0 = no limit).
+    ///     Setting a lower value initially can speed up first-frame time.
+    open func setOptimized(_ asset: AVAsset, bufferDuration: TimeInterval = 10, peakBitRate: Double = 0) {
+        let playerItem = AVPlayerItem(asset: asset)
+        playerItem.preferredForwardBufferDuration = bufferDuration
+        if peakBitRate > 0 {
+            playerItem.preferredPeakBitRate = peakBitRate
+        }
+        playerItem.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+        self.set(playerItem: playerItem)
+    }
+
+    /// Asynchronously preloads essential asset keys, then sets the asset on the player
+    /// with optimized buffer configuration. This achieves the fastest possible time-to-first-frame
+    /// by loading metadata concurrently before creating the player item.
+    ///
+    /// - Parameters:
+    ///   - asset: The AVAsset to preload and play
+    ///   - bufferDuration: Preferred forward buffer duration in seconds (default: 10)
+    ///   - peakBitRate: Preferred peak bit rate in bits per second (default: 0 = no limit)
+    @available(iOS 16.0, *)
+    open func setAsync(_ asset: AVAsset, bufferDuration: TimeInterval = 10, peakBitRate: Double = 0) async throws {
+        // Preload essential keys concurrently before creating the player item.
+        // This avoids blocking the player while it synchronously loads metadata.
+        let (isPlayable, _) = try await asset.load(.isPlayable, .duration)
+
+        guard isPlayable else {
+            throw PlayerError.loading.error()
+        }
+
+        await MainActor.run {
+            self.setOptimized(asset, bufferDuration: bufferDuration, peakBitRate: peakBitRate)
+        }
+    }
+
+    /// Preloads an asset's essential keys in the background for later use.
+    /// Call this ahead of time (e.g., when a lesson list loads) to warm up the asset,
+    /// so that when the user taps play, the asset is ready instantly.
+    ///
+    /// - Parameter asset: The AVAsset to preload
+    /// - Returns: Whether the asset is playable
+    @available(iOS 16.0, *)
+    @discardableResult
+    open class func preload(_ asset: AVAsset) async throws -> Bool {
+        let (isPlayable, _) = try await asset.load(.isPlayable, .duration)
+        return isPlayable
+    }
+
+    /// The preferred forward buffer duration of the current player item.
+    /// Setting this to a lower value (e.g., 5-15 seconds) reduces the initial buffering delay.
+    /// A value of 0 lets the system decide.
+    public var preferredForwardBufferDuration: TimeInterval {
+        get {
+            return self.player.currentItem?.preferredForwardBufferDuration ?? 0
+        }
+        set {
+            self.player.currentItem?.preferredForwardBufferDuration = newValue
+        }
+    }
+
+    /// The preferred peak bit rate of the current player item.
+    /// Limiting the initial bit rate can speed up time-to-first-frame on slower connections.
+    /// A value of 0 means no limit.
+    public var preferredPeakBitRate: Double {
+        get {
+            return self.player.currentItem?.preferredPeakBitRate ?? 0
+        }
+        set {
+            self.player.currentItem?.preferredPeakBitRate = newValue
+        }
     }
     
     // MARK: - ProvidesView
@@ -115,6 +197,12 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         }
     }
     
+    public var isMuted: Bool = false {
+        didSet {
+            player.isMuted = isMuted
+        }
+    }
+    
     public var playing: Bool {
         return self.player.rate > 0
     }
@@ -135,6 +223,14 @@ extension AVMediaSelectionOption: TextTrackMetadata {
     open func play() {
         self.player.play()
     }
+
+    open func playAtRate(_ rate: Float) {
+        self.player.rate = rate
+    }
+
+    open func setRate(_ rate: Float) {
+        self.player.rate = rate
+    }
     
     open func pause() {
         self.player.pause()
@@ -153,7 +249,8 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         }
 
         super.init()
-        
+
+        self.player.isMuted = self.isMuted
         self.addPlayerObservers()
         self.regularPlayerView.configureForPlayer(player: self.player)
         self.setupAirplay()
@@ -206,13 +303,15 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         let inProgressSeekTarget = self.seekTarget
 
         let completion: (Bool) -> Void = { [weak self] _ in
-            guard let self = self else { return }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
 
-            self.time = CMTimeGetSeconds(inProgressSeekTarget)
-            if CMTimeCompare(inProgressSeekTarget, self.seekTarget) == 0 {
-                self.isSeekInProgress = false
-            } else {
-                self.seekToTarget()
+                self.time = CMTimeGetSeconds(inProgressSeekTarget)
+                if CMTimeCompare(inProgressSeekTarget, self.seekTarget) == 0 {
+                    self.isSeekInProgress = false
+                } else {
+                    self.seekToTarget()
+                }
             }
         }
 
@@ -249,12 +348,25 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         playerItem.addObserver(self, forKeyPath: KeyPath.PlayerItem.Status, options: [.initial, .new], context: nil)
         playerItem.addObserver(self, forKeyPath: KeyPath.PlayerItem.PlaybackLikelyToKeepUp, options: [.initial, .new], context: nil)
         playerItem.addObserver(self, forKeyPath: KeyPath.PlayerItem.LoadedTimeRanges, options: [.initial, .new], context: nil)
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerItemDidPlayToEndTime(_:)),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem
+        )
     }
-    
+
     private func removePlayerItemObservers(fromPlayerItem playerItem: AVPlayerItem) {
         playerItem.removeObserver(self, forKeyPath: KeyPath.PlayerItem.Status, context: nil)
         playerItem.removeObserver(self, forKeyPath: KeyPath.PlayerItem.PlaybackLikelyToKeepUp, context: nil)
         playerItem.removeObserver(self, forKeyPath: KeyPath.PlayerItem.LoadedTimeRanges, context: nil)
+
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: playerItem
+        )
     }
     
     private func addPlayerObservers() {
@@ -357,8 +469,12 @@ extension AVMediaSelectionOption: TextTrackMetadata {
         guard let bufferedCMTime = loadedTimeRanges.first?.timeRangeValue.end, let bufferedTime = bufferedCMTime.timeInterval else {
             return
         }
-        
+
         self.bufferedTime = bufferedTime
+    }
+
+    @objc private func playerItemDidPlayToEndTime(_ notification: Notification) {
+        self.delegate?.playerDidFinishPlaying?(player: self)
     }
     
     // MARK: - Capability Protocol Helpers
@@ -424,6 +540,9 @@ extension RegularPlayer: FillModeCapable {
             case .fill:
                 
                 gravity = .resizeAspectFill
+            case .scaleToFit:
+                
+                gravity = .resize
             }
 
             (self.view.layer as! AVPlayerLayer).videoGravity = gravity
